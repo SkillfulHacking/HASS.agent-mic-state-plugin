@@ -9,12 +9,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[
-        'websockets',
-        'websockets.connection',
-        'asyncio',
-        'uuid',
-    ],
+    hiddenimports=['win32file', 'win32con', 'pywintypes'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
