@@ -50,27 +50,68 @@ log = logging.getLogger(__name__)
 
 # ── Token cache ───────────────────────────────────────────────────────────────
 
+import time
+
 def load_token() -> str | None:
     try:
         data = json.loads(token_file.read_text())
         if not set(SCOPES).issubset(set(data.get("scopes", []))):
             log.info("Cached token missing required scopes, re-authorizing")
             return None
+        if time.time() >= data.get("expires_at", 0):
+            log.info("Cached token expired, attempting refresh")
+            return _refresh_token(data.get("refresh_token"))
         return data.get("access_token")
     except Exception:
         return None
 
 
-def save_token(access_token: str, scopes: list) -> None:
-    token_file.write_text(json.dumps({"access_token": access_token, "scopes": scopes}))
+def save_token(access_token: str, refresh_token: str, expires_in: int, scopes: list) -> None:
+    token_file.write_text(json.dumps({
+        "access_token":  access_token,
+        "refresh_token": refresh_token,
+        "expires_at":    time.time() + expires_in - 60,  # 60s early margin
+        "scopes":        scopes,
+    }))
 
 
 def clear_token() -> None:
     token_file.unlink(missing_ok=True)
 
+
+def _refresh_token(refresh_token: str | None) -> str | None:
+    if not refresh_token:
+        clear_token()
+        return None
+    try:
+        data = urllib.parse.urlencode({
+            "client_id":     CLIENT_ID,
+            "grant_type":    "refresh_token",
+            "refresh_token": refresh_token,
+        }).encode()
+        req = urllib.request.Request(
+            "https://discord.com/api/oauth2/token",
+            data=data,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+        save_token(
+            body["access_token"],
+            body["refresh_token"],
+            body.get("expires_in", 604800),
+            body.get("scope", " ".join(SCOPES)).split(),
+        )
+        log.info("Token refreshed silently")
+        return body["access_token"]
+    except Exception as e:
+        log.error(f"Token refresh failed: {e}")
+        clear_token()
+        return None
+
 # ── OAuth2 token exchange (public client — no secret) ─────────────────────────
 
-def exchange_code(code: str) -> str | None:
+def exchange_code(code: str) -> tuple[str, str, int] | None:
     try:
         data = urllib.parse.urlencode({
             "client_id":  CLIENT_ID,
@@ -83,7 +124,8 @@ def exchange_code(code: str) -> str | None:
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read()).get("access_token")
+            body = json.loads(resp.read())
+        return body["access_token"], body["refresh_token"], body.get("expires_in", 604800)
     except Exception as e:
         log.error(f"Token exchange failed: {e}")
         return None
@@ -224,9 +266,10 @@ def check_discord_state() -> dict:
                 log.error("No auth code returned from AUTHORIZE")
                 return result
 
-            access_token = exchange_code(code)
-            if not access_token:
+            exchanged = exchange_code(code)
+            if not exchanged:
                 return result
+            access_token, refresh_token, expires_in = exchanged
 
             resp = ipc.send_recv({
                 "nonce": str(uuid.uuid4()),
@@ -238,7 +281,7 @@ def check_discord_state() -> dict:
                 clear_token()
                 return result
 
-            save_token(access_token, resp.get("data", {}).get("scopes", SCOPES))
+            save_token(access_token, refresh_token, expires_in, resp.get("data", {}).get("scopes", SCOPES))
 
         user_id = resp.get("data", {}).get("user", {}).get("id")
 
