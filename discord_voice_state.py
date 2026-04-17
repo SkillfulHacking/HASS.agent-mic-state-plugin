@@ -14,21 +14,28 @@ import json
 import sys
 import os
 import logging
+import urllib.request
+import urllib.parse
+import uuid
 from pathlib import Path
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-CLIENT_ID = "1494532375496097853"  # Replace with your Discord Application ID
-DISCORD_RPC_PORT = 6463
-DISCORD_RPC_PORTS = range(6463, 6473)   # Discord tries 6463-6472
-ORIGIN = "https://streamkit.discord.com"
+CLIENT_ID = "1494532375496097853"
+CLIENT_SECRET = "YOUR_CLIENT_SECRET_HERE"  # Discord Developer Portal → OAuth2
+SCOPES = ["rpc", "rpc.voice.read"]
+ORIGIN = "http://localhost"  # Must be registered in Developer Portal → RPC Origins
+DISCORD_RPC_PORTS = range(6463, 6473)
 TIMEOUT = 5
 
-# ── Logging (writes to %APPDATA%\hass-mic-state\plugin.log) ──────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
 log_dir = Path(os.environ.get("APPDATA", ".")) / "hass-mic-state"
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / "plugin.log"
+token_file = log_dir / "token.json"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     filename=str(log_file),
@@ -39,10 +46,48 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ── Core Logic ────────────────────────────────────────────────────────────────
+# ── Token cache ───────────────────────────────────────────────────────────────
+
+def load_token() -> str | None:
+    try:
+        return json.loads(token_file.read_text()).get("access_token")
+    except Exception:
+        return None
+
+
+def save_token(access_token: str) -> None:
+    token_file.write_text(json.dumps({"access_token": access_token}))
+
+
+def clear_token() -> None:
+    token_file.unlink(missing_ok=True)
+
+
+# ── OAuth2 token exchange ─────────────────────────────────────────────────────
+
+def exchange_code(code: str) -> str | None:
+    try:
+        data = urllib.parse.urlencode({
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": code,
+        }).encode()
+        req = urllib.request.Request(
+            "https://discord.com/api/oauth2/token",
+            data=data,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read()).get("access_token")
+    except Exception as e:
+        log.error(f"Token exchange failed: {e}")
+        return None
+
+
+# ── RPC helpers ───────────────────────────────────────────────────────────────
 
 async def find_discord_port() -> int | None:
-    """Find which port Discord RPC is listening on."""
     for port in DISCORD_RPC_PORTS:
         try:
             uri = f"ws://127.0.0.1:{port}/?v=1&client_id={CLIENT_ID}"
@@ -58,14 +103,18 @@ async def find_discord_port() -> int | None:
     return None
 
 
+async def send_recv(ws, payload: dict) -> dict:
+    await ws.send(json.dumps(payload))
+    raw = await asyncio.wait_for(ws.recv(), timeout=TIMEOUT)
+    return json.loads(raw)
+
+
+# ── Core logic ────────────────────────────────────────────────────────────────
+
 async def check_voice_channel() -> bool:
-    """
-    Connect to Discord local RPC and check if user is in a voice channel.
-    Returns True if in a voice channel, False otherwise.
-    """
     port = await find_discord_port()
     if port is None:
-        log.warning("Discord RPC not found on any port. Is Discord running?")
+        log.warning("Discord RPC not found. Is Discord running?")
         return False
 
     uri = f"ws://127.0.0.1:{port}/?v=1&client_id={CLIENT_ID}"
@@ -76,28 +125,60 @@ async def check_voice_channel() -> bool:
             additional_headers={"Origin": ORIGIN},
             open_timeout=TIMEOUT
         ) as ws:
-            # Wait for initial READY event from Discord
-            raw = await asyncio.wait_for(ws.recv(), timeout=TIMEOUT)
-            data = json.loads(raw)
-            log.debug(f"Initial event: cmd={data.get('cmd')} evt={data.get('evt')}")
+            data = json.loads(await asyncio.wait_for(ws.recv(), timeout=TIMEOUT))
+            log.debug(f"Initial event: {data.get('evt')}")
 
-            if data.get("evt") != "READY":
-                log.warning(f"Expected READY, got: {data.get('evt')}")
+            access_token = load_token()
 
-            # Request current voice channel
-            payload = {
-                "nonce": "hass_mic_check",
-                "args": {},
-                "cmd": "GET_SELECTED_VOICE_CHANNEL"
-            }
-            await ws.send(json.dumps(payload))
+            if access_token:
+                resp = await send_recv(ws, {
+                    "nonce": str(uuid.uuid4()),
+                    "cmd": "AUTHENTICATE",
+                    "args": {"access_token": access_token}
+                })
+                if resp.get("evt") == "ERROR":
+                    log.warning("Cached token rejected, re-authorizing")
+                    clear_token()
+                    access_token = None
 
-            raw = await asyncio.wait_for(ws.recv(), timeout=TIMEOUT)
-            data = json.loads(raw)
-            log.debug(f"Voice channel response: {json.dumps(data)}")
+            if not access_token:
+                resp = await send_recv(ws, {
+                    "nonce": str(uuid.uuid4()),
+                    "cmd": "AUTHORIZE",
+                    "args": {"client_id": CLIENT_ID, "scopes": SCOPES}
+                })
+                if resp.get("evt") == "ERROR":
+                    log.error(f"Authorization failed: {resp}")
+                    return False
 
-            # data["data"] is None when not in a channel, dict when in one
-            in_channel = data.get("data") is not None
+                code = resp.get("data", {}).get("code")
+                if not code:
+                    log.error("No auth code in AUTHORIZE response")
+                    return False
+
+                access_token = exchange_code(code)
+                if not access_token:
+                    return False
+                save_token(access_token)
+
+                resp = await send_recv(ws, {
+                    "nonce": str(uuid.uuid4()),
+                    "cmd": "AUTHENTICATE",
+                    "args": {"access_token": access_token}
+                })
+                if resp.get("evt") == "ERROR":
+                    log.error(f"Authentication failed after exchange: {resp}")
+                    clear_token()
+                    return False
+
+            resp = await send_recv(ws, {
+                "nonce": str(uuid.uuid4()),
+                "cmd": "GET_SELECTED_VOICE_CHANNEL",
+                "args": {}
+            })
+            log.debug(f"Voice channel response: {json.dumps(resp)}")
+
+            in_channel = resp.get("data") is not None
             log.info(f"Voice channel active: {in_channel}")
             return in_channel
 
