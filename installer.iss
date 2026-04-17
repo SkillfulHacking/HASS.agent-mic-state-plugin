@@ -5,7 +5,7 @@
 #define MyAppName "HASS.agent-mic-state-plugin"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "HASS.agent-mic-state-plugin"
-#define MyAppURL "https://github.com/<YOUR_GITHUB_USERNAME>/HASS.agent-mic-state-plugin"
+#define MyAppURL "https://github.com/SkillfulHacking/HASS.agent-mic-state-plugin"
 #define MyAppExeName "discord_voice_state.exe"
 #define MyOutputDir "installer_output"
 

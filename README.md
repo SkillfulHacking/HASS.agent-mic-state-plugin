@@ -23,7 +23,7 @@ A lightweight Windows plugin that detects whether you are currently in a Discord
 
 ## Installation
 
-1. Download the latest installer from [Releases](https://github.com/<YOUR_GITHUB_USERNAME>/HASS.agent-mic-state-plugin/releases)
+1. Download the latest installer from [Releases](https://github.com/SkillfulHacking/HASS.agent-mic-state-plugin/releases)
 2. Run `HASS.agent-mic-state-plugin-setup-v1.0.0.exe`
 3. Follow the installer prompts
 4. The install path will be shown and copied to your clipboard on completion

@@ -21,7 +21,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: pip install websockets pyinstaller
+        run: pip install pywin32 pyinstaller
 
       - name: Build exe
         run: pyinstaller discord_voice_state.spec
