@@ -17,12 +17,14 @@ import logging
 import urllib.request
 import urllib.parse
 import uuid
+import hashlib
+import base64
+import secrets
 from pathlib import Path
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
 CLIENT_ID = "1494532375496097853"
-CLIENT_SECRET = "YOUR_CLIENT_SECRET_HERE"  # Discord Developer Portal → OAuth2
 SCOPES = ["rpc", "rpc.voice.read"]
 ORIGIN = "http://localhost"  # Must be registered in Developer Portal → RPC Origins
 DISCORD_RPC_PORTS = range(6463, 6473)
@@ -46,6 +48,16 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+# ── PKCE ──────────────────────────────────────────────────────────────────────
+
+def generate_pkce_pair() -> tuple[str, str]:
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    return code_verifier, code_challenge
+
+
 # ── Token cache ───────────────────────────────────────────────────────────────
 
 def load_token() -> str | None:
@@ -63,15 +75,15 @@ def clear_token() -> None:
     token_file.unlink(missing_ok=True)
 
 
-# ── OAuth2 token exchange ─────────────────────────────────────────────────────
+# ── OAuth2 token exchange (public client — no secret required) ────────────────
 
-def exchange_code(code: str) -> str | None:
+def exchange_code(code: str, code_verifier: str) -> str | None:
     try:
         data = urllib.parse.urlencode({
             "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
             "grant_type": "authorization_code",
             "code": code,
+            "code_verifier": code_verifier,
         }).encode()
         req = urllib.request.Request(
             "https://discord.com/api/oauth2/token",
@@ -142,10 +154,17 @@ async def check_voice_channel() -> bool:
                     access_token = None
 
             if not access_token:
+                code_verifier, code_challenge = generate_pkce_pair()
+
                 resp = await send_recv(ws, {
                     "nonce": str(uuid.uuid4()),
                     "cmd": "AUTHORIZE",
-                    "args": {"client_id": CLIENT_ID, "scopes": SCOPES}
+                    "args": {
+                        "client_id": CLIENT_ID,
+                        "scopes": SCOPES,
+                        "code_challenge": code_challenge,
+                        "code_challenge_method": "S256",
+                    }
                 })
                 if resp.get("evt") == "ERROR":
                     log.error(f"Authorization failed: {resp}")
@@ -156,7 +175,7 @@ async def check_voice_channel() -> bool:
                     log.error("No auth code in AUTHORIZE response")
                     return False
 
-                access_token = exchange_code(code)
+                access_token = exchange_code(code, code_verifier)
                 if not access_token:
                     return False
                 save_token(access_token)
