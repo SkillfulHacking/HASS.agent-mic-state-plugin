@@ -3,7 +3,7 @@
 ; https://jrsoftware.org/isinfo.php
 
 #define MyAppName "HASS.agent-mic-state-plugin"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "HASS.agent-mic-state-plugin"
 #define MyAppURL "https://github.com/SkillfulHacking/HASS.agent-mic-state-plugin"
 #define MyAppExeName "discord_voice_state.exe"
