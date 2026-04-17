@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# Logs
+*.log
