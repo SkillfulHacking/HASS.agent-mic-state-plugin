@@ -16,9 +16,6 @@ import logging
 import urllib.request
 import urllib.parse
 import uuid
-import hashlib
-import base64
-import secrets
 import win32file
 from pathlib import Path
 
@@ -51,15 +48,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── PKCE ──────────────────────────────────────────────────────────────────────
-
-def generate_pkce_pair() -> tuple[str, str]:
-    code_verifier  = secrets.token_urlsafe(64)
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).rstrip(b"=").decode()
-    return code_verifier, code_challenge
-
 # ── Token cache ───────────────────────────────────────────────────────────────
 
 def load_token() -> str | None:
@@ -82,13 +70,12 @@ def clear_token() -> None:
 
 # ── OAuth2 token exchange (public client — no secret) ─────────────────────────
 
-def exchange_code(code: str, code_verifier: str) -> str | None:
+def exchange_code(code: str) -> str | None:
     try:
         data = urllib.parse.urlencode({
-            "client_id":     CLIENT_ID,
-            "grant_type":    "authorization_code",
-            "code":          code,
-            "code_verifier": code_verifier,
+            "client_id":  CLIENT_ID,
+            "grant_type": "authorization_code",
+            "code":       code,
         }).encode()
         req = urllib.request.Request(
             "https://discord.com/api/oauth2/token",
@@ -223,16 +210,10 @@ def check_discord_state() -> dict:
                 access_token = None
 
         if not access_token:
-            code_verifier, code_challenge = generate_pkce_pair()
             resp = ipc.send_recv({
                 "nonce": str(uuid.uuid4()),
                 "cmd":   "AUTHORIZE",
-                "args":  {
-                    "client_id":             CLIENT_ID,
-                    "scopes":                SCOPES,
-                    "code_challenge":        code_challenge,
-                    "code_challenge_method": "S256",
-                }
+                "args":  {"client_id": CLIENT_ID, "scopes": SCOPES}
             })
             if resp.get("evt") == "ERROR":
                 log.error(f"AUTHORIZE failed: {resp.get('data', {}).get('message')}")
@@ -243,7 +224,7 @@ def check_discord_state() -> dict:
                 log.error("No auth code returned from AUTHORIZE")
                 return result
 
-            access_token = exchange_code(code, code_verifier)
+            access_token = exchange_code(code)
             if not access_token:
                 return result
 
