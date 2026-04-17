@@ -1,10 +1,10 @@
 """
 HASS.agent-mic-state-plugin
 Connects to Discord via IPC named pipe to read voice channel state
-and game activity for use as a HASS.Agent sensor.
+for use as a HASS.Agent sensor.
 
 Returns:
-    stdout: JSON with voice_active (bool) and activity (object or null)
+    stdout: JSON with voice_active, muted, deafened (all bool)
     exit code: 0 always (HASS.Agent expects clean exit)
 """
 
@@ -22,8 +22,7 @@ from pathlib import Path
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 CLIENT_ID = "1494532375496097853"
-SCOPES    = ["rpc", "rpc.voice.read", "identify", "guilds"]
-MAX_GUILDS_TO_CHECK = 5
+SCOPES    = ["rpc", "rpc.voice.read"]
 
 # ── Opcodes ───────────────────────────────────────────────────────────────────
 
@@ -179,53 +178,10 @@ class DiscordIPC:
             win32file.CloseHandle(self.handle)
             self.handle = None
 
-# ── Discord REST ──────────────────────────────────────────────────────────────
-
-def rest_get(path: str, access_token: str) -> dict | list | None:
-    try:
-        req = urllib.request.Request(
-            f"https://discord.com/api/v10{path}",
-            headers={"Authorization": f"Bearer {access_token}"}
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read())
-    except Exception as e:
-        log.error(f"REST GET {path} failed: {e}")
-        return None
-
-# ── Activity detection ────────────────────────────────────────────────────────
-
-def get_current_activity(ipc: DiscordIPC, access_token: str, user_id: str) -> dict | None:
-    guilds = rest_get("/users/@me/guilds", access_token)
-    if not guilds:
-        return None
-
-    for guild in guilds[:MAX_GUILDS_TO_CHECK]:
-        try:
-            resp = ipc.send_recv({
-                "nonce": str(uuid.uuid4()),
-                "cmd":   "GET_GUILD",
-                "args":  {"guild_id": guild["id"], "timeout": 1000}
-            })
-            for member in resp.get("data", {}).get("members", []):
-                if member.get("user", {}).get("id") != user_id:
-                    continue
-                for activity in member.get("activities", []):
-                    if activity.get("type") == 0:  # 0 = Playing
-                        return {
-                            "name":    activity.get("name"),
-                            "details": activity.get("details"),
-                            "state":   activity.get("state"),
-                        }
-        except Exception as e:
-            log.debug(f"GET_GUILD failed for {guild.get('id')}: {e}")
-
-    return None
-
 # ── Core logic ────────────────────────────────────────────────────────────────
 
 def check_discord_state() -> dict:
-    result = {"voice_active": False, "muted": False, "deafened": False, "activity": None}
+    result = {"voice_active": False, "muted": False, "deafened": False}
 
     ipc = DiscordIPC()
     if not ipc.connect():
@@ -283,8 +239,6 @@ def check_discord_state() -> dict:
 
             save_token(access_token, refresh_token, expires_in, resp.get("data", {}).get("scopes", SCOPES))
 
-        user_id = resp.get("data", {}).get("user", {}).get("id")
-
         voice_resp = ipc.send_recv({
             "nonce": str(uuid.uuid4()),
             "cmd":   "GET_SELECTED_VOICE_CHANNEL",
@@ -303,10 +257,6 @@ def check_discord_state() -> dict:
         result["deafened"] = settings.get("deaf", False)
         log.info(f"Muted: {result['muted']}  Deafened: {result['deafened']}")
 
-        if user_id:
-            result["activity"] = get_current_activity(ipc, access_token, user_id)
-        log.info(f"Activity: {result['activity']}")
-
     except Exception as e:
         log.error(f"Unexpected error: {type(e).__name__}: {e}")
     finally:
@@ -322,7 +272,7 @@ def main():
         sys.exit(0)
     except Exception as e:
         log.critical(f"Fatal error in main: {e}")
-        print(json.dumps({"voice_active": False, "muted": False, "deafened": False, "activity": None}))
+        print(json.dumps({"voice_active": False, "muted": False, "deafened": False}))
         sys.exit(0)
 
 
